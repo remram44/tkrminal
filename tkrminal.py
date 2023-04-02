@@ -1,12 +1,14 @@
 import asyncio
 import asyncio.protocols
 import asyncio.subprocess
+import sys
 import threading
 import tkinter as tk
+import traceback
 from tkinter import ttk
 
 
-def run_in_terminal(cmd, *, title="Terminal", actions=None, max_lines=1000):
+def _make_terminal(*, title="Terminal", actions=None, max_lines=1000):
     # Create window
     root = tk.Tk()
     root.title(title)
@@ -56,17 +58,95 @@ def run_in_terminal(cmd, *, title="Terminal", actions=None, max_lines=1000):
             add_text_queue.append(text)
         root.event_generate('<<AddLineToConsole>>', when='tail')
 
+    root.bind('<<QuitTerminal>>', lambda *args: root.quit())
+
+    def stop_threadsafe():
+        root.event_generate('<<QuitTerminal>>', when='tail')
+
+    return root.mainloop, add_text_threadsafe, stop_threadsafe
+
+
+def run_in_terminal(cmd, *, title="Terminal", actions=None, max_lines=1000):
+    run, add_text, stop = _make_terminal(
+        title=title,
+        actions=actions,
+        max_lines=max_lines,
+    )
+
     # Start an asyncio event loop in a thread and run the command
     thread = threading.Thread(
         target=lambda: _start_process(
             cmd,
-            add_text_threadsafe,
+            add_text,
         ),
     )
     thread.daemon = True
     thread.start()
 
-    root.mainloop()
+    run()
+
+
+def make_terminal(func, *, title="Terminal", actions=None, max_lines=1000):
+    run, add_text, stop = _make_terminal(
+        title=title,
+        actions=actions,
+        max_lines=max_lines,
+    )
+
+    sys.stdout = TextFileWrapper(add_text)
+    sys.stderr = TextFileWrapper(add_text)
+
+    def wrapper():
+        try:
+            func()
+        except Exception as e:
+            traceback.print_exception(type(e), e, e.__traceback__)
+        finally:
+            stop()
+
+    thread = threading.Thread(
+        target=wrapper,
+    )
+    thread.start()
+
+    run()
+
+
+class TextFileWrapper(object):
+    def __init__(self, add_text):
+        self._write = add_text
+        self.buffer = BytesFileWrapper(add_text)
+
+    def write(self, data):
+        self._write(data)
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+    line_buffering = True
+    mode = 'w'
+    newlines = None
+
+
+class BytesFileWrapper(object):
+    def __init__(self, add_text):
+        self._write = add_text
+
+    def write(self, data):
+        self._write(data.decode('utf-8', 'replace'))
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+    mode = 'w'
 
 
 def _start_process(cmd, add_text):
